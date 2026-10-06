@@ -1,0 +1,38 @@
+loadaddr=0x10800000
+bootfile=uImage_rxn
+netdev=eth0
+ethprime=FEC0
+rd_loadaddr=(0x10800000 + 0x300000)
+uboot=u-boot.bin
+kernel=uImage
+ethact=FEC0
+baudrate=115200
+jtag=on
+joglcd=rt
+mtdids=gpmi-nand
+partition=3M(boot),1M(bb1),1M(env),10M(kernel_a),10M(kernel_b),30M(rootfs),10M(settings),8M(pdj),5M(bb2),30M(core),40M(gui),102M(quickboot),5M(bb2),1M(bbt),0x500000@0x0(block_boot),0x4400000@0x500000(block_linux),-@0x0(block_all)
+bootargs_base=setenv bootargs console=ttymxc0,115200 fec_mac=${ethaddr} mtdparts=${mtdids}:${partition} consoleblank=0 jtag=${jtag} isolcpus=3 rx3.noerp galcore.powerManagement=0
+serverip=192.168.1.101
+ipaddr=192.168.1.103
+netmask=255.255.255.0
+nfsroot=/home/iMX6/ltib/rootfs
+boot_type=normal
+update_status=success
+kernel_bank=A
+soft_version=00.00
+lvds_num=1
+mmcdev=/dev/mmcblk0p1
+bootargs_mmc=setenv bootargs ${bootargs} ip=none rootfstype=ext4 root=${mmcdev} rootwait video=mxcfb0:dev=hdmi,1280x720@60,if=RGB24,bpp=16
+bootcmd_mmc=run bootargs_base bootargs_mmc; mmc dev 0; mmc read ${loadaddr} 0x800 0x4000; bootm ${loadaddr}
+bootargs_nfs=setenv bootargs ${bootargs} root=/dev/nfs ip=${ipaddr} nfsroot=${serverip}:${nfsroot},v3,tcp video=mxcfb0
+bootcmd_net=run bootargs_base bootargs_nfs; tftpboot ${loadaddr} ${bootfile}; bootm
+bootargs_nand=setenv bootargs ${bootargs} ip=none rootwait video=mxcfb0
+bootargs_nand_A=nand read ${loadaddr} 0x500000 0x700000
+bootargs_nand_B=nand read ${loadaddr} 0xF00000 0x700000
+bootcmd_nand=run bootargs_base bootargs_nand bootargs_nand_${kernel_bank}; bootm
+bootcmd_sdnet=run bootargs_base bootargs_nfs; mmc dev 2; mmc read ${loadaddr} 0x800 0x4000; bootm
+bootdelay=2
+aplstart=on
+rootfs=sd
+bootcmd=run bootcmd_mmc
+dhcp_server=0

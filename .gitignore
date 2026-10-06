@@ -1,0 +1,53 @@
+# --- Proprietary (Pioneer/AlphaTheta): never publish ---
+analysis/rbp.s
+analysis/rbp.syms
+rx3-rootfs/sysroot-lib/
+*.img
+rx3-out/
+rbp
+rbp.pioneer
+
+# --- Build outputs ---
+*.so
+*.o
+*.ko
+uImage*
+spl.bin
+rx3-uboot/SPL
+rx3-uboot/*.img
+rx3-kernel/out/*
+!rx3-kernel/out/rx3-wandboard-port.patch
+rx3-rootfs/src/
+
+# --- Local ---
+logs/
+*.log
+.venv-serial/
+__pycache__/
+.DS_Store
+
+# --- Obsolete Debian/chroot and Yocto era (kept locally; summarised in PORTING-RBP.md) ---
+panel/
+build.sh
+RX3-WANDBOARD-TESTING.md
+YOCTO-BUILD.md
+rootfs.img
+
+# --- Not part of the final package (debug / bring-up / notes; kept locally) ---
+analysis/
+NEXT-SESSION.md
+rx3-kernel/wand-3.0.35/
+rx3-kernel/out/rx3-wandboard.config
+rx3-kernel/out/rx3_wandboard_defconfig
+rx3-rootfs/fw_env.pioneer.txt
+rx3-rootfs/shims/g2dshim-rx3.c
+rx3-rootfs/shims/g2dtest.c
+rx3-rootfs/shims/memscan.c
+tools/fbshot.sh
+tools/pl2303con.py
+tools/tftpd.py
+tools/uboot-cmd.sh
+tools/uboot-debugboot.sh
+rx3-rootfs/shims/patchtest-rx3.c
+PORTING-RBP.md
+

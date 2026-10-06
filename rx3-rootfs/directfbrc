@@ -1,0 +1,5 @@
+# RX3-native Wandboard (Pioneer DirectFB reads /usr/etc/directfbrc).
+# Panel touch is USB HID, fed to rbp as its tsc2007 by touchshim-rx3; keep DirectFB off the evdev
+# (the real RX3 has no evdev touchscreen for linux_input to find).
+disable-module=linux_input
+no-linux-input-grab

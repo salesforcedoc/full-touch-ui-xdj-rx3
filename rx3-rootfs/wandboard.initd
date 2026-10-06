@@ -1,0 +1,93 @@
+#!/bin/sh
+# /etc/rc.d/init.d/wandboard — Wandboard-only additions to the stock RX3 rootfs.
+# Runs from rcS (added to cfg_services in rc.conf). Everything else is Pioneer's.
+
+case "$1" in
+start)
+	# RX3 panel geometry: rbp lays out 1280x800. The MPI7002 HDMI panel accepts CVT
+	# 1280x800@60 (83.5 MHz) and scales it; the kernel boots at CEA 720p as a safe default.
+	fbset -fb /dev/fb0 -g 1280 800 1280 800 16 -t 11976 200 72 22 3 128 6 -hsync low -vsync high
+	# mxc_hdmi only powers the HDMI PHY on unblank; the RX3 has no fbcon to do it
+	echo 0 > /sys/class/graphics/fb0/blank
+	# mxc_hdmi re-reads the EDID when the HDMI link drops (cable bump, panel power blip), finds no modes and goes
+	# back to 720p: rbp's bottom 80 rows are cut off. Put 1280x800 back within 2 s.
+	( while :; do
+		sleep 2
+		[ "$(cat /sys/class/graphics/fb0/virtual_size)" = 1280,800 ] && continue
+		fbset -fb /dev/fb0 -g 1280 800 1280 800 16 -t 11976 200 72 22 3 128 6 -hsync low -vsync high
+		echo 0 > /sys/class/graphics/fb0/blank
+		echo "$(cut -d' ' -f1 /proc/uptime) fb0 back to 1280x800" >> /tmp/fb-watch.log
+	done ) </dev/null >/dev/null 2>&1 &
+
+	# USB-stick notifications: Pioneer's udev rules write "mount/umount <dir>" to the kernel's
+	# /proc/udev_* queues; rbp reads FIFOs in /tmp instead (touchshim redirects Pioneer's rbp there, the
+	# PrimeBox build opens them itself). Bridge each queue into its FIFO; the stick slots go through usb-bridge.sh, which holds a
+	# mount message until the stick has stayed in for 2.5 s (a quick stick swap once left rbp's USB1 stuck).
+	for n in usb1 usb2 usbctn1 usbctn2; do
+		[ -p /tmp/udev_$n ] || mkfifo -m 666 /tmp/udev_$n
+		case $n in
+		usb[12]) ( while :; do /bin/sh /root/wand/usb-bridge.sh $n; sleep 1; done ) </dev/null >/dev/null 2>&1 & ;;
+		*) ( while :; do cat /proc/udev_$n > /tmp/udev_$n; sleep 1; done ) </dev/null >/dev/null 2>&1 & ;;
+		esac
+	done
+
+	# Pioneer's initramfs only does "ifconfig eth0 up"; the RX3 never needed an address.
+	ifconfig lo up
+	udhcpc -b -i eth0 -s /usr/share/udhcpc/default.script >/dev/null 2>&1
+
+	# SSH (static dropbear; the RX3 rootfs ships no ssh server)
+	mkdir -p /etc/dropbear
+	dropbear -R -B -p 22
+
+	# exFAT sticks: Pioneer's udev rule mounts them with exfat-fuse, but udev runs first in cfg_services and
+	# nothing loads fuse.ko before it (Pioneer's init.d/fuse is not in the list), so a stick that is already in at
+	# boot is not mounted. Load fuse now and redo the rule's commands for any exFAT partition left unmounted.
+	modprobe fuse 2>/dev/null
+	for dev in /sys/block/sd*/sd*[0-9]; do
+		[ -e "$dev" ] || continue
+		k=${dev##*/}
+		grep -q "^/dev/$k " /proc/mounts && continue
+		[ "$(/sbin/blkid -s TYPE -o value /dev/$k 2>/dev/null)" = exfat ] || continue
+		case "$(readlink ${dev%/*})" in             # /sys/block/sdX -> ../devices/.../2-1.1/...
+			*/2-1.1/*) slot=usb2 ;;
+			*/2-1.2/*|*/1-1*/*) slot=usb1 ;;
+			*) continue ;;
+		esac
+		m=/media/$slot/$k
+		mkdir -p $m
+		/sbin/mount.exfat-fuse -o rw,noatime /dev/$k $m && {
+			/root/pdj/write_serialnum.sh $m 0; /root/pdj/decrypt_autoexec.sh $m
+			echo -n mount $m > /proc/udev_$slot
+		}
+	done
+
+	# FLX4 at boot: it has its own power, so after the host goes quiet it only reconnects once its USB port has
+	# been dead for a while (10 s is reliable, 6 s is not). If it hasn't appeared 15 s after boot, switch every
+	# empty port of the UUGear MEGA4 (VIA VL817, 2109:2817, per-port power switching) off for 10 s and back on.
+	# Connected ports (touch screen, sticks) are left alone. Log: /root/wand/boot-usb.log
+	(
+		exec >/root/wand/boot-usb.log 2>&1
+		sleep 15
+		for try in 1 2; do
+			grep -qx 2b73 /sys/bus/usb/devices/*/idVendor 2>/dev/null && { echo "FLX4 present (try $try)"; exit 0; }
+			hub=""
+			for d in /sys/bus/usb/devices/*; do
+				[ "$(cat $d/idVendor 2>/dev/null)" = 2109 ] && [ "$(cat $d/idProduct 2>/dev/null)" = 2817 ] && { hub=$d; break; }
+			done
+			[ -n "$hub" ] || { echo "no MEGA4 hub"; exit 0; }
+			node=/dev/bus/usb/$(printf %03d $(cat $hub/busnum))/$(printf %03d $(cat $hub/devnum))
+			for n in 1 2 3 4; do
+				[ -e $hub.$n ] && continue
+				echo "FLX4 missing: power-cycling $(basename $hub) port $n"
+				HUBTOOL=cycle HUB=$node PORT=$n OFF_MS=10000 LD_PRELOAD=/usr/lib/hubtool.so /bin/true &
+			done
+			wait
+			sleep 8
+		done
+		grep -qx 2b73 /sys/bus/usb/devices/*/idVendor 2>/dev/null && echo "FLX4 present after power cycle" || echo "FLX4 still missing"
+	) </dev/null &
+	;;
+stop)
+	killall dropbear udhcpc 2>/dev/null
+	;;
+esac

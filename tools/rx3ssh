@@ -1,0 +1,3 @@
+#!/bin/sh
+# ssh to the RX3-native Wandboard. RX3_HOST = board address (required), RX3_KEY = private key file.
+exec ssh -i "${RX3_KEY:-$HOME/Downloads/rx3_board_ed25519}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=8 "root@${RX3_HOST:?set RX3_HOST to the board address}" "$@"
