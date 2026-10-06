@@ -3,13 +3,14 @@
 # Runs inside debian:bookworm. Mounts:
 #   /cram   rx3root volume (fsck.cramfs --extract of v1.20 rootfs.cramfs, at /cram/rootfs)
 #   /img    ~/Downloads/rx3_v120/iso_root/images   (Pioneer v1.20 update payload)
-#   /in     ~/Downloads   (wandboard-build/ = this project, the ssh public key)
+#   /in     the folder that contains this repository (and the ssh public key, if any)
 #   /out    output dir
 # Settings: RX3_ROOT_PASSWORD (required), RX3_SSH_PUBKEY (optional). Example:
 #   docker run --rm -e RX3_ROOT_PASSWORD='choose-one' -v rx3root:/cram -v ~/Downloads/rx3_v120/iso_root/images:/img:ro \
 #     -v ~/Downloads:/in -v ~/Downloads/wandboard-build/rx3-out:/out debian:bookworm \
-#     bash /in/wandboard-build/rx3-rootfs/build-rx3-sd.sh
+#     bash /in/<this repository>/rx3-rootfs/build-rx3-sd.sh
 set -euo pipefail
+REPO=$(cd "$(dirname "$0")/.." && pwd)    # this repository (any folder name), as mounted in the container
 apt-get update -qq >/dev/null
 apt-get install -y -qq e2fsprogs fdisk u-boot-tools openssl >/dev/null 2>&1
 
@@ -37,9 +38,9 @@ fi
 md5sum $R/root/pdj/rbp*
 
 echo "=== [3] Wandboard additions: ssh, dhcp, credentials ==="
-install -m 755 /in/wandboard-build/rx3-rootfs/src/dropbear-2024.86/dropbearmulti $R/usr/sbin/dropbearmulti
+install -m 755 $REPO/rx3-rootfs/src/dropbear-2024.86/dropbearmulti $R/usr/sbin/dropbearmulti
 for p in dropbear dropbearkey scp; do ln -sf dropbearmulti $R/usr/sbin/$p; done
-install -m 755 /in/wandboard-build/rx3-rootfs/wandboard.initd $R/etc/rc.d/init.d/wandboard
+install -m 755 $REPO/rx3-rootfs/wandboard.initd $R/etc/rc.d/init.d/wandboard
 sed -i 's/^cfg_services="\(.*\)"/cfg_services="\1 wandboard"/; s/^cfg_services_r="/cfg_services_r="wandboard /' $R/etc/rc.d/rc.conf
 grep '^cfg_services' $R/etc/rc.d/rc.conf
 # root password (console + ssh): RX3_ROOT_PASSWORD, passed into the container (docker run -e RX3_ROOT_PASSWORD=...)
@@ -54,25 +55,26 @@ else echo "no ssh key ($PUB): password login only"; fi
 grep -q /usr/sbin/dropbear $R/etc/shells 2>/dev/null || true
 echo wandboard-rx3 > $R/etc/hostname
 # touch: USB-HID panel -> rbp tsc2007 (shim is inert outside rbp); keep DirectFB off the evdev
-for so in touchshim-rx3 knobshim-flx4 audioshim-rx3 uishim-rx3; do install -m 755 /in/wandboard-build/rx3-rootfs/shims/$so.so $R/usr/lib/$so.so; done
-install -m 755 /in/wandboard-build/rx3-rootfs/shims/hubtool.so $R/usr/lib/hubtool.so   # FLX4 port power-cycle at boot (not preloaded)
+for so in touchshim-rx3 knobshim-flx4 audioshim-rx3 uishim-rx3; do install -m 755 $REPO/rx3-rootfs/shims/$so.so $R/usr/lib/$so.so; done
+install -m 755 $REPO/rx3-rootfs/shims/hubtool.so $R/usr/lib/hubtool.so   # FLX4 port power-cycle at boot (not preloaded)
 mkdir -p $R/root/wand
-install -m 755 /in/wandboard-build/rx3-rootfs/usb-bridge.sh /in/wandboard-build/rx3-rootfs/rbp-restart.sh $R/root/wand/
+install -m 755 $REPO/rx3-rootfs/usb-bridge.sh $REPO/rx3-rootfs/rbp-restart.sh $R/root/wand/
 # exFAT sticks: Pioneer mounts them with exfat-fuse; its fuse.ko is built for Pioneer's kernel, so install ours
 # (built against our kernel tree: rx3-kernel/out/modules/fuse.ko, vermagic 3.0.101-2790-gc248ed7-gc4dcc22-dirty).
 # Pioneer's init.d/fuse modprobes it at boot.
-KREL=3.0.101-2790-gc248ed7-gc4dcc22-dirty
+KREL=$(grep -a -o 'vermagic=[^ ]*' $REPO/rx3-kernel/out/modules/fuse.ko | head -1 | cut -d= -f2)   # = the kernel's release
+echo "kernel release (from fuse.ko): $KREL"
 mkdir -p $R/lib/modules/$KREL/kernel/fs/fuse
-install -m 644 /in/wandboard-build/rx3-kernel/out/modules/fuse.ko $R/lib/modules/$KREL/kernel/fs/fuse/fuse.ko
+install -m 644 $REPO/rx3-kernel/out/modules/fuse.ko $R/lib/modules/$KREL/kernel/fs/fuse/fuse.ko
 grep -q fuse.ko $R/lib/modules/$KREL/modules.dep 2>/dev/null || echo "kernel/fs/fuse/fuse.ko:" >> $R/lib/modules/$KREL/modules.dep
 echo "/usr/lib/touchshim-rx3.so /usr/lib/knobshim-flx4.so /usr/lib/audioshim-rx3.so /usr/lib/uishim-rx3.so" > $R/etc/ld.so.preload
-mkdir -p $R/usr/etc; install -m 644 /in/wandboard-build/rx3-rootfs/directfbrc $R/usr/etc/directfbrc
+mkdir -p $R/usr/etc; install -m 644 $REPO/rx3-rootfs/directfbrc $R/usr/etc/directfbrc
 
 echo "=== [4] boot files ==="
 mkdir -p $R/boot
-cp /in/wandboard-build/rx3-kernel/out/uImage $R/boot/uImage
-cp /in/wandboard-build/rx3-uboot/u-boot-dtb.img $R/u-boot-dtb.img      # SPL FS-mode payload
-cp /in/wandboard-build/rx3-rootfs/fw_env.wandboard.txt $R/boot/
+cp $REPO/rx3-kernel/out/uImage $R/boot/uImage
+cp $REPO/rx3-uboot/u-boot-dtb.img $R/u-boot-dtb.img      # SPL FS-mode payload
+cp $REPO/rx3-rootfs/fw_env.wandboard.txt $R/boot/
 
 echo "=== [5] ext4 (features a 3.0 kernel can mount) ==="
 PART_MB=$((SIZE_MB - PART_START_MB))
@@ -84,11 +86,11 @@ echo "=== [6] assemble card image ==="
 rm -f $IMG
 dd if=/dev/zero of=$IMG bs=1M count=$SIZE_MB status=none
 echo "${PART_START_MB}M,,L" | sfdisk -q $IMG
-dd if=/in/wandboard-build/rx3-uboot/SPL        of=$IMG bs=1K seek=1   conv=notrunc status=none
-dd if=/in/wandboard-build/rx3-uboot/u-boot.img of=$IMG bs=512 seek=138 conv=notrunc status=none   # 0x8A
-mkenvimage -s 0x2000 -o /tmp/env.bin /in/wandboard-build/rx3-rootfs/fw_env.wandboard.txt
+dd if=$REPO/rx3-uboot/SPL        of=$IMG bs=1K seek=1   conv=notrunc status=none
+dd if=$REPO/rx3-uboot/u-boot.img of=$IMG bs=512 seek=138 conv=notrunc status=none   # 0x8A
+mkenvimage -s 0x2000 -o /tmp/env.bin $REPO/rx3-rootfs/fw_env.wandboard.txt
 dd if=/tmp/env.bin of=$IMG bs=1K seek=768 conv=notrunc status=none                                  # 0xC0000
-dd if=/in/wandboard-build/rx3-kernel/out/uImage of=$IMG bs=512 seek=2048 conv=notrunc status=none   # 0x800
+dd if=$REPO/rx3-kernel/out/uImage of=$IMG bs=512 seek=2048 conv=notrunc status=none   # 0x800
 dd if=/tmp/rootfs.ext4 of=$IMG bs=1M seek=$PART_START_MB conv=notrunc status=none
 sfdisk -l $IMG
 ls -la $IMG

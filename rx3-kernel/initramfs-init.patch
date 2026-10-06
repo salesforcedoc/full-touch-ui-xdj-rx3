@@ -1,0 +1,12 @@
+--- a/init
++++ b/init
+@@ -167,7 +167,8 @@
+ update_start=0
+ #reg=`regio T,D,020A4000,40000000`	# GPIO_3_30 : update start from ErP uCOM
+ #if [ "$reg" = "40000000" ]; then
+-erp_write=`gpio -i 3 30`		# GPIO_3_30 : update start from ErP uCOM
++# [wandboard] GPIO3_30 is unconnected on the Wandboard; rx3.noerp skips the ErP update-trigger read
++if grep -q rx3.noerp /proc/cmdline; then erp_write=0; else erp_write=`gpio -i 3 30`; fi		# GPIO_3_30 : update start from ErP uCOM
+ if [ "$erp_write" = "1" ]; then
+ 	update_start=1
+ else

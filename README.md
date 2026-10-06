@@ -134,7 +134,7 @@ exFAT support.
 | `rx3-rootfs/` | board scripts, DirectFB config, u-boot env, SD image builder |
 | `rx3-kernel/`, `rx3-uboot/` | kernel port patch (GPL) + Dockerfile, u-boot config |
 | `tools/` | button-label generator, deploy and ssh helpers |
-| [`docs/BUILD.md`](docs/BUILD.md) | how to build it — a starting point, not yet tested from scratch; expect to adapt the steps |
+| [`docs/BUILD.md`](docs/BUILD.md) | how to build it (tested once from a fresh clone; you supply the firmware and Pioneer's GPL source) |
 | [`docs/NOTES.md`](docs/NOTES.md) | the non-obvious facts: kernel fixes, gotchas, what the shims supply |
 | [`docs/PORTING.md`](docs/PORTING.md) | adapting it to another board, screen or controller |
 
