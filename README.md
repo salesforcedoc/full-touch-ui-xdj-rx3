@@ -12,6 +12,8 @@ running on a **Wandboard QuadPlus** (same processor family as the XDJ-RX3) with 
 
 **Status:** working, in daily use.
 
+![The deck screen with both decks loaded and the added touch controls (track titles blurred)](docs/images/deck-screen.png)
+
 ## Background
 
 I started this project to get as close as possible to using the XDJ-RX3's player software on hardware as similar as
@@ -19,8 +21,6 @@ possible to the real unit: the same i.MX6 processor family, Pioneer's own Linux 
 player running unmodified. Once that worked, the missing piece was everything the RX3's hardware provides: its
 buttons, knobs, jog wheels and screen controls. So the project grew a DDJ-FLX4 as the control surface and sound
 card, and a full touch UI for the RX3 buttons the FLX4 doesn't have.
-
-![The deck screen with both decks loaded and the added touch controls (track titles blurred)](docs/images/deck-screen.png)
 
 ## ⚠️ Disclaimer
 
