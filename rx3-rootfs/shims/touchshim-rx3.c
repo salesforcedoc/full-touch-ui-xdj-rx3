@@ -8,7 +8,9 @@
  * tsc2007 device from that evdev touchscreen, and stands in for the rest of the RX3 board:
  *   - front-panel SPI links (socketpair stand-ins; panel ready flag) and the "1st key" mask (no panel CPUs)
  *   - /proc/udev_* stick notices -> /tmp FIFOs (debounced bridge)
- *   - USB over-current GPIOs 126/204 read as "no fault"; RX3 board revision 0x700 in /proc/cpuinfo
+ *   - /dev/gpiodrv: GpioManager's constructor read of an input pin gets a synthetic level 1 = "no fault" (init()
+ *     waits on it), writes are swallowed and the USB over-current lines 126/204 always read 1 -- one shared FIFO
+ *     must not let an output pin's write be taken as another pin's level; RX3 board rev 0x700 in cpuinfo
  *   - browse list drag scrolling (the only in-memory code change; checked against the expected words)
  *   - inert in every process except rbp
  *
@@ -25,6 +27,7 @@
  * Build: see build-shims.sh (links against the RX3 rootfs glibc 2.13).
  */
 #define _GNU_SOURCE
+#include <stdint.h>          /* must precede the evdev structs below: glibc's other headers no longer imply it */
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,6 +70,7 @@ static int evfd = -1;
 static int out_pipe[2] = { -1, -1 };
 static int fake_fd[64];
 static int use_mt;
+static int raw_xmin, raw_xmax, raw_ymin, raw_ymax;   /* the chosen panel's own digitizer grid */
 static pthread_t reader_tid;
 static int reader_started;
 static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
@@ -76,7 +80,6 @@ static long sys_read(int fd, void *b, size_t n) { return syscall(SYS_read, fd, b
 static int sys_close(int fd) { return syscall(SYS_close, fd); }
 static int sys_ioctl(int fd, unsigned long r, void *a) { return syscall(SYS_ioctl, fd, r, a); }
 
-#include <stdint.h>
 #include "rbp_process.h"
 
 static int env_int(const char *n, int d) { const char *s = getenv(n); return (s && *s) ? atoi(s) : d; }
@@ -165,10 +168,19 @@ static int probe(const char *path)
     struct absinfo32 a;
     int fd = sys_open(path, O_RDONLY | O_NONBLOCK);
     if (fd < 0) return 0;
-    int ok = 0;
-    if (sys_ioctl(fd, EVIOCGABS(ABS_X), &a) == 0 && sys_ioctl(fd, EVIOCGABS(ABS_Y), &a) == 0) { use_mt = 0; ok = 1; }
-    else if (sys_ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &a) == 0 && sys_ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &a) == 0) { use_mt = 1; ok = 1; }
+    int ok = 0, xmin = 0, xmax = 0, ymin = 0, ymax = 0, mt = 0;
+    if (sys_ioctl(fd, EVIOCGABS(ABS_X), &a) == 0) {
+        xmin = a.minimum; xmax = a.maximum; mt = 0;
+        if (sys_ioctl(fd, EVIOCGABS(ABS_Y), &a) == 0) { ymin = a.minimum; ymax = a.maximum; ok = 1; }
+    } else if (sys_ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &a) == 0) {
+        xmin = a.minimum; xmax = a.maximum; mt = 1;
+        if (sys_ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &a) == 0) { ymin = a.minimum; ymax = a.maximum; ok = 1; }
+    }
     sys_close(fd);
+    /* Take the raw range from the panel itself. It is not a constant: the MPI7002 grid is 1024x600, the
+     * 15.6" TSTP CTouch panel that ended up on this board reports 1920x1080. Assuming the former for the
+     * latter squashes every touch in the right/bottom ~47% of the glass onto the screen's far edges. */
+    if (ok) { use_mt = mt; raw_xmin = xmin; raw_xmax = xmax; raw_ymin = ymin; raw_ymax = ymax; }
     return ok;
 }
 
@@ -180,7 +192,8 @@ static int open_touch(void)
     for (int i = 0; i < 16; i++) {
         snprintf(p, sizeof p, "/dev/input/event%d", i);
         if (probe(p)) {
-            if (logon) fprintf(stderr, "[touchshim] touch device %s (%s)\n", p, use_mt ? "MT" : "ABS");
+            if (logon) fprintf(stderr, "[touchshim] touch device %s (%s) raw %d..%d x %d..%d\n",
+                               p, use_mt ? "MT" : "ABS", raw_xmin, raw_xmax, raw_ymin, raw_ymax);
             return sys_open(p, O_RDONLY);
         }
     }
@@ -192,12 +205,14 @@ extern int uishim_touch(int x, int y, int down) __attribute__((weak));
 static int scr_x, scr_y;         /* last touch in rbp screen pixels (1280x800) */
 static void to_raw(int rx, int ry, int *lx, int *ly)
 {
-    /* The MPI7002 digitizer reports in the panel's native 1024x600 pixel grid, and the
-     * panel scales our whole 1280x800 image onto it: map the full range. */
-    int xmin = env_int("TSC_RAW_XMIN", 0), xmax = env_int("TSC_RAW_XMAX", 1024);
-    int ymin = env_int("TSC_RAW_YMIN", 0), ymax = env_int("TSC_RAW_YMAX", 600);
-    long sx = (long)(rx - xmin) * (RBP_W - 1) / (xmax - xmin > 0 ? xmax - xmin : 1);
-    long sy = (long)(ry - ymin) * (RBP_H - 1) / (ymax - ymin > 0 ? ymax - ymin : 1);
+    /* The digitizer reports in the panel's own grid (read from evdev by probe()); the panel shows our whole
+     * 1280x800 image, so map that grid onto the full screen. TSC_RAW_* override the detected range. */
+    int xmin = env_int("TSC_RAW_XMIN", raw_xmin), xmax = env_int("TSC_RAW_XMAX", raw_xmax);
+    int ymin = env_int("TSC_RAW_YMIN", raw_ymin), ymax = env_int("TSC_RAW_YMAX", raw_ymax);
+    if (xmax <= xmin) { xmin = 0; xmax = 1024; }
+    if (ymax <= ymin) { ymin = 0; ymax = 600; }
+    long sx = (long)(rx - xmin) * (RBP_W - 1) / (xmax - xmin);
+    long sy = (long)(ry - ymin) * (RBP_H - 1) / (ymax - ymin);
     /* measured (9 crosshair targets over the screen, uishim's /tmp/uishim.cal): every tap landed
      * right of and below the target by a near-constant ~17 / ~10 px (no scale error) -> shift it back */
     sx += env_int("TSC_OFF_X", -17);
@@ -336,30 +351,95 @@ static const char *udev_redirect(const char *path, char *buf, size_t n)
     return buf;
 }
 
-/* USB over-current inputs. rbp's GpioManager reads RX3 GPIO pins through Pioneer's /dev/gpiodrv (lseek to the pin
- * number once, then 1-byte reads). Pins 126 (USB1) and 204 (USB2) are the RX3's active-low USB power-switch fault
- * lines; UsbStorageManager::handleGpioMessage -> notify_over_current(level 0) raises "USB Error. Remove the
- * device." On the Wandboard those i.MX6 pins (GPIO4_30, GPIO7_12) are other signals (126 reads 0), so report
- * them as "no fault" (1). The MEGA4 hub does its own over-current protection. TSC_NO_OC_FIX=1 off. */
+/* GPIO. rbp works RX3 GPIO pins through Pioneer's /dev/gpiodrv: open, lseek to the pin number once, then 1-byte
+ * reads of an *input* pin's current level (common::GpioManager::read @0x28f8c) or 1-byte writes of an *output*
+ * pin's (GpioManager::write @0x28efc -> write(fd,&byte,1)). On the RX3 that node is a pin-addressed char driver,
+ * so a read returns at once and a write to an output pin can never be seen by a reader of some other pin. Here
+ * the node is one FIFO shared by every fd rbp opens on it, which breaks both halves of that:
+ *
+ * - The constructor's read of an input pin has no writer to answer it, so it blocks. ui::UsbStorageManager does
+ *   that twice while ui::UiObjectManager::init() is building the UI, which hangs the main thread inside init():
+ *   startUp() returns 0 before TouchPanel::openDevice(), and no touch works at all (dead screen). The ctor only
+ *   reads when it was given a callback *and* the pin is an input, i.e. exactly the two over-current lines below;
+ *   output-pin managers (mixerengine::MasterOut's pins 89/90, ui::PortTest's) never read. So answer the *first*
+ *   read on each gpiodrv fd -- the constructor's, and with init() waiting on it -- with level 1 ("no fault") and
+ *   let later reads fall through to the FIFO and block, which parks the monitor thread in read() rather than
+ *   spinning it (answering every read instead lets GpioManager::run() @0x28ac8 loop at ~250k reads/s).
+ *
+ * - A *write* is a byte in that shared FIFO, and whatever GpioManager is parked in read() takes it as its own
+ *   pin's level. The mixer's attenuator relays (mixerengine::MasterOut::setATTEN) and the panel LEDs
+ *   (ui::panel_protocol::MainGpioLed::controGpio) write through 48 call sites, so switching an output off makes a
+ *   reader see level 0 -- and on pins 126/204 that is the RX3's active-low USB power-switch fault:
+ *   UsbStorageManager::handleGpioMessage -> notify_over_current(0) puts up "USB Error. Remove the device." and
+ *   latches it. Swallow writes to a tracked gpiodrv fd, as the char driver's pins are isolated.
+ *
+ * Pins 126 (USB1) and 204 (USB2) are then always read as level 1 whatever the FIFO holds, so nothing can raise
+ * that caution (the MEGA4 hub does its own over-current protection; pins 17/94/144 belong to PortTest, service
+ * mode). The pin an fd addresses is learned from the constructor's lseek(fd, pin, SEEK_SET) -- on a FIFO lseek
+ * itself fails, so it cannot be read back from the fd afterwards. TSC_NO_GPIO_FAKE=1 keeps the constructor read
+ * and the over-current lines out of it, TSC_NO_GPIO_WRITE_SWALLOW=1 the writes, TSC_NO_OC_FIX=1 the tracking. */
 #define GPIO_OC_USB1 126
 #define GPIO_OC_USB2 204
-static unsigned char gpio_fd[256];
+static unsigned char gpio_fd[256];    /* fd belongs to /dev/gpiodrv */
+static unsigned char gpio_first[256]; /* its constructor read has already been answered */
+static unsigned char gpio_pin[256];   /* the pin it was lseeked to (255 = still unknown) */
+static unsigned char gpio_oc[256];    /* over-current line: already logged */
+static unsigned char gpio_wrote;      /* already logged a swallowed write */
 static int track_gpio(const char *path, int fd)
 {
-    if (active && fd >= 0 && fd < 256 && path && strcmp(path, "/dev/gpiodrv") == 0 && !getenv("TSC_NO_OC_FIX")) gpio_fd[fd] = 1;
+    if (active && fd >= 0 && fd < 256 && path && strcmp(path, "/dev/gpiodrv") == 0 && !getenv("TSC_NO_OC_FIX")) {
+        gpio_fd[fd] = 1;
+        gpio_first[fd] = 0;   /* a fresh open is a fresh constructor */
+        gpio_pin[fd] = 255;
+        gpio_oc[fd] = 0;
+    }
     return fd;
 }
+static int gpio_oc_pin(int fd) { return gpio_pin[fd] == GPIO_OC_USB1 || gpio_pin[fd] == GPIO_OC_USB2; }
+
 ssize_t read(int fd, void *buf, size_t n)
 {
-    long r = sys_read(fd, buf, n);
-    if (r == 1 && fd >= 0 && fd < 256 && gpio_fd[fd]) {
-        long pos = syscall(SYS_lseek, fd, 0, SEEK_CUR);
-        if ((pos == GPIO_OC_USB1 || pos == GPIO_OC_USB2) && ((unsigned char *)buf)[0] != 1) {
-            if (logon) { char b[64]; int k = snprintf(b, sizeof b, "touchshim: gpio %ld over-current %d -> 1\n", pos, ((unsigned char *)buf)[0]); write(2, b, k); }
+    if (active && fd >= 0 && fd < 256 && gpio_fd[fd] && n >= 1 && !getenv("TSC_NO_GPIO_FAKE")) {
+        if (gpio_oc_pin(fd)) {                       /* the USB power-switch fault lines never report a fault */
             ((unsigned char *)buf)[0] = 1;
+            if (logon && !gpio_oc[fd]) {
+                gpio_oc[fd] = 1;
+                char b[80]; int k = snprintf(b, sizeof b, "touchshim: gpio fd %d (pin %d, over-current) read -> 1\n", fd, gpio_pin[fd]);
+                write(2, b, k);
+            }
+            return 1;
+        }
+        if (!gpio_first[fd]) {                       /* the constructor's read: init() is waiting on it */
+            gpio_first[fd] = 1;
+            ((unsigned char *)buf)[0] = 1;
+            if (logon) { char b[80]; int k = snprintf(b, sizeof b, "touchshim: gpio fd %d first read -> 1 (pin %d)\n", fd, gpio_pin[fd]); write(2, b, k); }
+            return 1;
         }
     }
-    return r;
+    return sys_read(fd, buf, n);                     /* anything else: block on the FIFO as before */
+}
+
+ssize_t write(int fd, const void *buf, size_t n)
+{
+    if (active && fd >= 0 && fd < 256 && gpio_fd[fd] && !is_fake(fd) && !getenv("TSC_NO_GPIO_WRITE_SWALLOW")) {
+        if (logon && !gpio_wrote) {
+            gpio_wrote = 1;
+            char b[112]; int k = snprintf(b, sizeof b, "touchshim: gpio fd %d (pin %d) write of %d swallowed: a shared FIFO would hand it to the readers\n",
+                                          fd, gpio_pin[fd], n ? ((const unsigned char *)buf)[0] : 0);
+            write(2, b, k);
+        }
+        return (ssize_t)n;                           /* an output pin: no reader of another pin may see it */
+    }
+    return syscall(SYS_write, fd, buf, n);
+}
+
+off_t lseek(int fd, off_t off, int whence)
+{
+    if (active && fd >= 0 && fd < 256 && gpio_fd[fd] && whence == SEEK_SET && off >= 0 && off < 255) {
+        gpio_pin[fd] = (unsigned char)off;            /* the constructor selects the pin here */
+        if (logon) { char b[64]; int k = snprintf(b, sizeof b, "touchshim: gpio fd %d -> pin %d\n", fd, (int)off); write(2, b, k); }
+    }
+    return syscall(SYS_lseek, fd, off, whence);
 }
 
 /* RX3 board revision. rbp (juce::SystemStats::getCpuRevision) reads "Revision" from /proc/cpuinfo and
@@ -437,6 +517,6 @@ int ioctl(int fd, unsigned long req, ...)
 int close(int fd)
 {
     if (is_fake(fd)) fake_fd[fd] = 0;
-    if (fd >= 0 && fd < 256) gpio_fd[fd] = 0;
+    if (fd >= 0 && fd < 256) { gpio_fd[fd] = 0; gpio_first[fd] = 0; gpio_pin[fd] = 255; gpio_oc[fd] = 0; }
     return sys_close(fd);
 }

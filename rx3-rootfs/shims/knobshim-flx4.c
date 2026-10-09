@@ -554,12 +554,16 @@ static int cc_to_10bit(int v) { return (v << 3) | (v >> 4); }
 /* ---------------- jog (relative, CC 0x21/0x22/0x23/0x29, centre 0x40) ---------------- */
 static struct { unsigned vpos; unsigned long long last_ms; int moving; } jog[2];
 static int jog_ppr = 720, jog_rev, jog_idle_ms = 120, tempo_rev, knob_scale = 1;
+/* The chroot's glibc 2.13 keeps clock_gettime in librt, not libc, so go to the kernel directly:
+ * 263 on ARM EABI is the 32-bit-timespec one. (asm-generic headers spell it SYS_clock_gettime32,
+ * the 32-bit ARM ones SYS_clock_gettime -- same number either way. Same idiom as audioshim.) */
+#ifndef SYS_clock_gettime
+#define SYS_clock_gettime 263                  /* ARM EABI, 32-bit time (kernel 3.0) */
+#endif
 static unsigned long long now_ms(void)
 {
-     /* raw 32-bit-time syscall: musl headers map clock_gettime to
-      * __clock_gettime64, which the chroot's glibc 2.13 does not export */
      struct { long tv_sec; long tv_nsec; } ts;
-     syscall(SYS_clock_gettime32 /* 263 on ARM EABI */, 1 /* CLOCK_MONOTONIC */, &ts);
+     syscall(SYS_clock_gettime, 1 /* CLOCK_MONOTONIC */, &ts);
      return (unsigned long long)ts.tv_sec * 1000ULL + (unsigned long long)ts.tv_nsec / 1000000ULL;
 }
 static void handle_jog(int d, int val)

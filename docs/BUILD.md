@@ -55,6 +55,21 @@ extracted `rootfs/lib` into `rx3-rootfs/sysroot-lib/`, then:
 ```sh
 rx3-rootfs/shims/build-shims.sh touchshim-rx3 knobshim-flx4 audioshim-rx3 uishim-rx3 hubtool
 ```
+The script checks every import of each built `.so` against those four libs and fails on any symbol the RX3's
+glibc 2.13 does not export, so a shim built against the wrong headers cannot go unnoticed.
+
+A musl cross toolchain is not required: any ARM gcc can build them, because the script pins the ABI on its own
+(`-march=armv5t -mfloat-abi=soft -nostdlib`, `-U_FILE_OFFSET_BITS -U_TIME_BITS`, and `glibc-2.13-compat.h` via
+`-include`, which clears the C23 `__isoc23_*` redirects modern glibc headers would otherwise bring in). To build
+on an armhf host with only the distro compiler, give it the musl-style name the script uses and the soft-float
+stub header Debian omits:
+```sh
+mkdir -p ~/rx3/bin ~/rx3/armel-include/gnu
+ln -s "$(command -v arm-linux-gnueabihf-gcc)" ~/rx3/bin/arm-linux-musleabihf-gcc
+ln -s "$(command -v arm-linux-gnueabihf-objdump)" ~/rx3/bin/arm-linux-musleabihf-objdump
+cp /usr/include/gnu/stubs-hard.h ~/rx3/armel-include/gnu/stubs-soft.h   # the stub list is float-ABI-independent
+PATH=~/rx3/bin:$PATH CPATH=~/rx3/armel-include rx3-rootfs/shims/build-shims.sh <names...>
+```
 
 ## 5. dropbear (ssh)
 

@@ -1,6 +1,7 @@
 # --- Proprietary (Pioneer/AlphaTheta): never publish ---
 analysis/rbp.s
 analysis/rbp.syms
+/extracted/
 rx3-rootfs/sysroot-lib/
 *.img
 rx3-out/
