@@ -17,7 +17,8 @@
  * anti-aliased bitmaps: 27-row cells of 7-byte rows = 28 px, from character 0x20); a built-in 5x7
  * bitmap font is the fallback if the file can't be read.
  *
- * UISHIM_OFF=1 disables. Log: /root/wand/uishim.log. Inert outside rbp.
+ * UISHIM_OFF=1 disables. UISHIM_FPS=1 logs the presented frame rate once a second, with the time
+ * spent inside rbp's own Flip. Log: /root/wand/uishim.log. Inert outside rbp.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -1613,9 +1614,69 @@ static void draw_cal(void *dst)
             fill(dst, 255, 40, 40, x - 3, y - 3, 7, 7);
         }
 }
+/* UISHIM_FPS=1: count frames, because fb0 cannot say -- rbp may re-present an unchanged frame, and
+ * reading the framebuffer content cannot tell that from an idle UI. rbp flips with DSFLIP_WAITFORSYNC,
+ * so this is the rate the panel actually gets; the longest frame in the second shows a late one. */
+#ifndef SYS_clock_gettime
+#define SYS_clock_gettime 263                  /* ARM EABI, 32-bit time (librt is not linked) */
+#endif
+static unsigned long long fps_now_ms(void)
+{
+    struct { long s, ns; } ts;
+    if (syscall(SYS_clock_gettime, 1 /* CLOCK_MONOTONIC */, &ts) != 0) return 0;
+    return (unsigned long long)ts.s * 1000 + ts.ns / 1000000;
+}
+
+static pthread_mutex_t fps_m = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long fps_flip_sum, fps_flip_n, fps_flip_max;
+
+/* Time spent inside rbp's own Flip, i.e. the frame copy to fb0 plus the DSFLIP_WAITFORSYNC wait:
+ * what the frame period is actually made of. */
+static void fps_flip(unsigned long ms)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("UISHIM_FPS") ? 1 : 0;
+    if (!on) return;
+    pthread_mutex_lock(&fps_m);
+    fps_flip_sum += ms; fps_flip_n++;
+    if (ms > fps_flip_max) fps_flip_max = ms;
+    pthread_mutex_unlock(&fps_m);
+}
+
+static void fps_count(void)
+{
+    /* Counted on the wall-clock second boundary, not on a window starting at t0: simpler to read,
+     * and every value printed is a 32-bit unsigned long. Report once a second, so the window and
+     * the count can never disagree. Locked -- rbp presents from more than one thread (the tid in
+     * the line says which one reported). */
+    static int on = -1;
+    static unsigned long long tprev;
+    static unsigned long n, gapmax, total, lastsec;
+    unsigned long long now;
+    unsigned long sec, gap;
+    if (on < 0) on = getenv("UISHIM_FPS") ? 1 : 0;
+    if (!on) return;
+    now = fps_now_ms();
+    sec = (unsigned long)(now / 1000);
+    pthread_mutex_lock(&fps_m);
+    if (!tprev) { tprev = now; lastsec = sec; pthread_mutex_unlock(&fps_m); return; }
+    gap = (unsigned long)(now - tprev); tprev = now;
+    if (gap > gapmax) gapmax = gap;
+    n++; total++;
+    if (sec != lastsec) {
+        ulog("uishim: fps %lu (longest frame %lu ms, flip avg %lu max %lu ms, %lu frames, tid %ld)\n",
+             n, gapmax, fps_flip_n ? fps_flip_sum / fps_flip_n : 0, fps_flip_max, total,
+             (long)syscall(SYS_gettid));
+        n = 0; gapmax = 0; lastsec = sec;
+        fps_flip_sum = 0; fps_flip_n = 0; fps_flip_max = 0;
+    }
+    pthread_mutex_unlock(&fps_m);
+}
+
 static int my_flip(void *thiz, const void *region, int flags)
 {
     int mode = BROWSE_MODE;
+    fps_count();
     if (thiz == g_primary && strip_on && mode != 0 && g_dfb) {
         if (!g_deck) {
             render_all();
@@ -1755,7 +1816,12 @@ static int my_flip(void *thiz, const void *region, int flags)
             blit(thiz, g_msg[pw_state - 1], (1280 - MSG_W) / 2, (800 - MSG_H) / 2);
         if (cal_on) draw_cal(thiz);
     }
-    return real_flip(thiz, region, flags);
+    {
+        unsigned long long t0 = fps_now_ms();
+        int rc = real_flip(thiz, region, flags);
+        fps_flip((unsigned long)(fps_now_ms() - t0));
+        return rc;
+    }
 }
 
 
